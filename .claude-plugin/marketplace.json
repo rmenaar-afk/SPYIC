@@ -1,0 +1,16 @@
+{
+  "name": "mr-buffet-marketplace",
+  "owner": {
+    "name": "Robin Menaar"
+  },
+  "description": "Local marketplace for Mr. Buffet trading-tool plugins.",
+  "plugins": [
+    {
+      "name": "vibe-trading-skills",
+      "source": ".claude-plugin",
+      "description": "57 quantitative-trading skills (US / global / crypto focus) extracted and pruned from HKUDS/Vibe-Trading.",
+      "version": "0.1.0",
+      "category": "finance"
+    }
+  ]
+}

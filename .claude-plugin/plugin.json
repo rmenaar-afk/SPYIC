@@ -1,0 +1,24 @@
+{
+  "name": "vibe-trading-skills",
+  "version": "0.1.0",
+  "description": "57 quantitative-trading skills (US / global / crypto focus) covering market data sources, technical & fundamental analysis, factor research, options, crypto/DeFi, risk, and report generation. Extracted and pruned from HKUDS/Vibe-Trading.",
+  "author": {
+    "name": "HKUDS / Vibe-Trading contributors",
+    "url": "https://github.com/HKUDS/Vibe-Trading"
+  },
+  "homepage": "https://github.com/HKUDS/Vibe-Trading",
+  "repository": "https://github.com/HKUDS/Vibe-Trading",
+  "license": "see upstream repository",
+  "keywords": [
+    "trading",
+    "quant",
+    "finance",
+    "markets",
+    "backtesting",
+    "factors",
+    "options",
+    "crypto",
+    "technical-analysis",
+    "fundamental-analysis"
+  ]
+}
