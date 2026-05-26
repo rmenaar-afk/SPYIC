@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "vibe-trading-skills",
-      "source": ".claude-plugin",
+      "source": "./",
       "description": "57 quantitative-trading skills (US / global / crypto focus) extracted and pruned from HKUDS/Vibe-Trading.",
       "version": "0.1.0",
       "category": "finance"
