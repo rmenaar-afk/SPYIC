@@ -153,7 +153,7 @@ def get_spy_prices():
     """Return (prev_close, current_price) for SPY."""
     try:
         bars = yf.download("SPY", period="5d", interval="1d", auto_adjust=True, progress=False)
-        closes = bars["Close"].dropna()
+        closes = bars["Close"].squeeze().dropna()
         prev_close = float(closes.iloc[-2])
         # For current price, grab the latest 1-min bar
         req = StockBarsRequest(
