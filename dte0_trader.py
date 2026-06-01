@@ -141,7 +141,8 @@ def get_vix():
     """Return today's VIX as a decimal (e.g. 16.5 → 0.165)."""
     try:
         vix = yf.download("^VIX", period="5d", auto_adjust=True, progress=False)
-        last = float(vix["Close"].dropna().iloc[-1])
+        close = vix["Close"].squeeze()  # flatten MultiIndex column to Series if needed
+        last = float(close.dropna().iloc[-1])
         log.info(f"VIX = {last:.2f}")
         return last / 100.0
     except Exception as e:
