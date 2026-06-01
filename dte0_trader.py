@@ -64,7 +64,10 @@ CALL_DELTA       = 0.10
 PUT_WIDTH        = 10.0    # $
 CALL_WIDTH       = 5.0     # $
 PROFIT_TARGET    = 0.75    # close when 75% of credit collected
-ENTRY_LIMIT_HAIRCUT = 0.20 # accept 20% below model-mid credit to improve fill odds
+ENTRY_LIMIT_HAIRCUT = 0.20 # first limit = model-mid credit minus this, to improve fills
+ENTRY_CREDIT_FLOOR  = 0.40 # don't chase below this fraction of model-mid credit
+ENTRY_CHASE_STEP    = 0.05 # walk the credit limit down by $0.05/share per attempt
+ENTRY_FILL_WAIT     = 25   # seconds to wait for a fill before re-pricing
 VIX_MAX          = 17.0
 GAP_MAX          = 0.01    # 1%
 ACCOUNT_RISK_PCT = 0.25    # 25% of equity per day
@@ -312,12 +315,20 @@ def wait_for_fill(order_id, timeout_s=180, poll_s=3):
             log.error(f"Entry order terminal without fill: {status}")
             return None
         time.sleep(poll_s)
+    # Timed out — cancel, then re-check in case it filled in the race window.
     try:
         _requests.delete(f"{ALPACA_PAPER_BASE}/v2/orders/{order_id}",
                          headers=_alpaca_headers(), timeout=30)
-        log.warning("Entry order not filled within timeout — canceled.")
     except Exception as e:
-        log.warning(f"Cancel after timeout failed: {e}")
+        log.warning(f"Cancel request error: {e}")
+    try:
+        final = get_order(order_id)
+        if final.get("status") == "filled":
+            log.info("Order filled in the cancel race window — keeping fill.")
+            return final
+    except Exception as e:
+        log.warning(f"Post-cancel status check failed: {e}")
+    log.warning("Entry order not filled within timeout — canceled.")
     return None
 
 def net_credit_from_fill(order):
@@ -443,8 +454,11 @@ def main():
 
     # ── 3. Strike calculation ──────────────────────────────────────────────────
     sigma = vix_decimal
-    # Minutes from 10:00 to 4:00 PM close = 360 min
-    T_entry = minutes_to_T(360)
+    # Real minutes from now until the 4:00 PM ET close (0DTE expiry), floored at 5.
+    now_et = et_now()
+    mins_to_close = max((16 * 60) - (now_et.hour * 60 + now_et.minute), 5)
+    T_entry = minutes_to_T(mins_to_close)
+    log.info(f"Minutes to close: {mins_to_close}  (T={T_entry:.6f})")
 
     k_put_short_ideal  = strike_for_put_delta(S, T_entry, RISK_FREE, sigma, PUT_DELTA)
     k_put_long_ideal   = k_put_short_ideal - PUT_WIDTH
@@ -522,33 +536,30 @@ def main():
     entry_credit = spread_cost(S, k_ps, k_pl, k_cs, k_cl, T_entry, sigma)
     log.info(f"Estimated entry credit: ${entry_credit:.4f}/share  (${entry_credit*100:.2f}/contract)")
 
-    # ── 7. Place order ────────────────────────────────────────────────────────
-    # Limit = net credit we want to collect. Haircut below model-mid to improve fills.
-    limit_credit = max(round(entry_credit * (1 - ENTRY_LIMIT_HAIRCUT), 2), 0.01)
-    log.info(f"Submitting limit order: net credit >= ${limit_credit:.2f}/share")
-    order = place_iron_condor(ps_sym, pl_sym, cs_sym, cl_sym, contracts, limit_credit)
-    if order is None:
-        send_email("0DTE Trader: ORDER FAILED", f"Order submission failed for {today}. Check logs.")
-        return
-
+    # ── 7. Submit with a bounded price-chase until filled ───────────────────────
+    # Start near model-mid (minus haircut) and walk the demanded credit down toward
+    # the market until it fills, never below ENTRY_CREDIT_FLOOR of the model credit.
     legs = [ps_sym, pl_sym, cs_sym, cl_sym]
-    entry_email_body = (
-        f"Iron condor placed on {today}\n\n"
-        f"SPY @ {S:.2f}\n"
-        f"VIX: {vix_level:.1f}\n"
-        f"Contracts: {contracts}\n\n"
-        f"Put spread:  {k_ps:.0f}/{k_pl:.0f}  [{ps_sym}]\n"
-        f"Call spread: {k_cs:.0f}/{k_cl:.0f}  [{cs_sym}]\n\n"
-        f"Est. credit: ${entry_credit*100*contracts:.2f} total\n"
-        f"Max risk:    ${max_loss_per_contract*contracts:.2f}\n"
-    )
-    send_email(f"0DTE Trader: ENTERED ({contracts} contracts)", entry_email_body)
+    start_credit = max(round(entry_credit * (1 - ENTRY_LIMIT_HAIRCUT), 2), 0.05)
+    floor_credit = max(round(entry_credit * ENTRY_CREDIT_FLOOR, 2), 0.05)
+    attempt = start_credit
+    filled = None
+    while attempt >= floor_credit - 1e-9:
+        log.info(f"Submitting IC limit: net credit >= ${attempt:.2f}/share")
+        order = place_iron_condor(ps_sym, pl_sym, cs_sym, cl_sym, contracts, attempt)
+        if order is None:
+            send_email("0DTE Trader: ORDER FAILED", f"Order submission error on {today}. Check logs.")
+            return
+        filled = wait_for_fill(order["id"], timeout_s=ENTRY_FILL_WAIT, poll_s=3)
+        if filled:
+            break
+        attempt = round(attempt - ENTRY_CHASE_STEP, 2)
+        if attempt >= floor_credit - 1e-9:
+            log.info(f"Not filled — chasing credit down to ${attempt:.2f}/share")
 
-    # ── 8. Confirm the entry actually filled ────────────────────────────────────
-    filled = wait_for_fill(order["id"])
     if filled is None:
         send_email("0DTE Trader: NOT FILLED",
-                   f"Entry order {order['id']} did not fill on {today} and was canceled. "
+                   f"Iron condor did not fill on {today} down to ${floor_credit:.2f}/share credit. "
                    f"No position taken.")
         return
 
@@ -557,6 +568,18 @@ def main():
         log.warning(f"Could not read net credit from fill (got {actual_credit}); "
                     f"falling back to model estimate ${entry_credit:.4f}/share.")
         actual_credit = entry_credit
+
+    entry_email_body = (
+        f"Iron condor FILLED on {today}\n\n"
+        f"SPY @ {S:.2f}\n"
+        f"VIX: {vix_level:.1f}\n"
+        f"Contracts: {contracts}\n\n"
+        f"Put spread:  {k_ps:.0f}/{k_pl:.0f}  [{ps_sym}]\n"
+        f"Call spread: {k_cs:.0f}/{k_cl:.0f}  [{cs_sym}]\n\n"
+        f"Net credit:  ${actual_credit*100:.2f}/contract  (${actual_credit*100*contracts:.2f} total)\n"
+        f"Max risk:    ${max_loss_per_contract*contracts:.2f}\n"
+    )
+    send_email(f"0DTE Trader: ENTERED ({contracts} contracts)", entry_email_body)
     credit_dollars = actual_credit * 100 * contracts
     target_profit_dollars = PROFIT_TARGET * credit_dollars
     log.info(f"FILLED. Net credit ${actual_credit:.4f}/share  (${credit_dollars:.2f} total). "
