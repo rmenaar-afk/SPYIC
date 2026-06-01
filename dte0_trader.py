@@ -173,11 +173,13 @@ def get_spy_prices():
         log.error(f"SPY price fetch failed: {e}")
         return None, None
 
-def get_account_equity():
+def get_account_info():
+    """Return (equity, options_buying_power)."""
     acct = trading.get_account()
     equity = float(acct.equity)
-    log.info(f"Account equity = ${equity:,.2f}")
-    return equity
+    opt_bp = float(getattr(acct, "options_buying_power", None) or acct.buying_power)
+    log.info(f"Account equity = ${equity:,.2f}  options_BP = ${opt_bp:,.2f}")
+    return equity, opt_bp
 
 # ── option chain helpers ──────────────────────────────────────────────────────
 
@@ -427,7 +429,7 @@ def main():
         S = current_price
     log.info(f"Entry SPY price: {S:.2f}")
 
-    equity = get_account_equity()
+    equity, options_bp = get_account_info()
 
     # ── 3. Strike calculation ──────────────────────────────────────────────────
     sigma = vix_decimal
@@ -491,8 +493,19 @@ def main():
     # ── 5. Size the position ──────────────────────────────────────────────────
     max_width = max(k_ps - k_pl, k_cl - k_cs)
     max_loss_per_contract = max_width * 100
-    contracts = max(1, math.floor((ACCOUNT_RISK_PCT * equity) / max_loss_per_contract))
-    log.info(f"max_width={max_width:.2f}  max_loss/contract=${max_loss_per_contract:.0f}  contracts={contracts}")
+    risk_contracts = math.floor((ACCOUNT_RISK_PCT * equity) / max_loss_per_contract)
+    # Cap by actual options buying power (margin ≈ max loss), with a 5% safety buffer.
+    bp_contracts = math.floor((options_bp * 0.95) / max_loss_per_contract)
+    contracts = min(risk_contracts, bp_contracts)
+    log.info(f"max_width={max_width:.2f}  max_loss/contract=${max_loss_per_contract:.0f}  "
+             f"risk_cap={risk_contracts}  bp_cap={bp_contracts}  → contracts={contracts}")
+    if contracts < 1:
+        log.error(f"Insufficient buying power for even 1 contract "
+                  f"(need ${max_loss_per_contract:.0f}, have ${options_bp:.2f}).")
+        send_email("0DTE Trader: SKIP (no buying power)",
+                   f"Options BP ${options_bp:.2f} < ${max_loss_per_contract:.0f} needed for 1 contract. "
+                   f"Check for leftover open positions on {today}.")
+        return
 
     # ── 6. Calculate entry credit (BS model) ─────────────────────────────────
     entry_credit = spread_cost(S, k_ps, k_pl, k_cs, k_cl, T_entry, sigma)
