@@ -64,6 +64,7 @@ CALL_DELTA       = 0.10
 PUT_WIDTH        = 10.0    # $
 CALL_WIDTH       = 5.0     # $
 PROFIT_TARGET    = 0.75    # close when 75% of credit collected
+ENTRY_LIMIT_HAIRCUT = 0.20 # accept 20% below model-mid credit to improve fill odds
 VIX_MAX          = 17.0
 GAP_MAX          = 0.01    # 1%
 ACCOUNT_RISK_PCT = 0.25    # 25% of equity per day
@@ -225,9 +226,13 @@ def spread_cost(S, k_ps, k_pl, k_cs, k_cl, T, sigma):
 # ── order placement ───────────────────────────────────────────────────────────
 
 def place_iron_condor(
-    put_short_sym, put_long_sym, call_short_sym, call_long_sym, contracts
+    put_short_sym, put_long_sym, call_short_sym, call_long_sym, contracts, limit_price
 ):
-    """Submit 4-leg iron condor via REST API (SDK lacks OptionLeg in older versions)."""
+    """Submit 4-leg iron condor via REST API (SDK lacks OptionLeg in older versions).
+
+    Alpaca multi-leg orders must be LIMIT orders; limit_price is a positive value
+    (the net credit per share we want to collect, e.g. 0.25 for $25/contract).
+    """
     import requests as _requests
     url = "https://paper-api.alpaca.markets/v2/orders"
     headers = {
@@ -236,15 +241,16 @@ def place_iron_condor(
         "Content-Type": "application/json",
     }
     payload = {
-        "type": "market",
+        "type": "limit",
         "time_in_force": "day",
         "order_class": "mleg",
         "qty": str(contracts),
+        "limit_price": f"{limit_price:.2f}",
         "legs": [
-            {"symbol": put_short_sym,  "side": "sell", "ratio_qty": "1"},
-            {"symbol": put_long_sym,   "side": "buy",  "ratio_qty": "1"},
-            {"symbol": call_short_sym, "side": "sell", "ratio_qty": "1"},
-            {"symbol": call_long_sym,  "side": "buy",  "ratio_qty": "1"},
+            {"symbol": put_short_sym,  "side": "sell", "ratio_qty": "1", "position_intent": "sell_to_open"},
+            {"symbol": put_long_sym,   "side": "buy",  "ratio_qty": "1", "position_intent": "buy_to_open"},
+            {"symbol": call_short_sym, "side": "sell", "ratio_qty": "1", "position_intent": "sell_to_open"},
+            {"symbol": call_long_sym,  "side": "buy",  "ratio_qty": "1", "position_intent": "buy_to_open"},
         ],
     }
     try:
@@ -430,7 +436,10 @@ def main():
     log.info(f"Estimated entry credit: ${entry_credit:.4f}/share  (${entry_credit*100:.2f}/contract)")
 
     # ── 7. Place order ────────────────────────────────────────────────────────
-    order = place_iron_condor(ps_sym, pl_sym, cs_sym, cl_sym, contracts)
+    # Limit = net credit we want to collect. Haircut below model-mid to improve fills.
+    limit_credit = max(round(entry_credit * (1 - ENTRY_LIMIT_HAIRCUT), 2), 0.01)
+    log.info(f"Submitting limit order: net credit >= ${limit_credit:.2f}/share")
+    order = place_iron_condor(ps_sym, pl_sym, cs_sym, cl_sym, contracts, limit_credit)
     if order is None:
         send_email("0DTE Trader: ORDER FAILED", f"Order submission failed for {today}. Check logs.")
         return
