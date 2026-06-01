@@ -228,19 +228,19 @@ def place_iron_condor(
     put_short_sym, put_long_sym, call_short_sym, call_long_sym, contracts
 ):
     """Submit 4-leg iron condor as a single multi-leg order (net credit)."""
+    from alpaca.trading.requests import OptionLeg
     legs = [
-        {"symbol": put_short_sym,  "side": "sell", "ratio_qty": 1},
-        {"symbol": put_long_sym,   "side": "buy",  "ratio_qty": 1},
-        {"symbol": call_short_sym, "side": "sell", "ratio_qty": 1},
-        {"symbol": call_long_sym,  "side": "buy",  "ratio_qty": 1},
+        OptionLeg(symbol=put_short_sym,  side=OrderSide.SELL, ratio_qty=1),
+        OptionLeg(symbol=put_long_sym,   side=OrderSide.BUY,  ratio_qty=1),
+        OptionLeg(symbol=call_short_sym, side=OrderSide.SELL, ratio_qty=1),
+        OptionLeg(symbol=call_long_sym,  side=OrderSide.BUY,  ratio_qty=1),
     ]
-    order_data = {
-        "type": "market",
-        "time_in_force": "day",
-        "order_class": "mleg",
-        "legs": legs,
-        "qty": str(contracts),
-    }
+    order_data = MarketOrderRequest(
+        qty=contracts,
+        time_in_force=TimeInForce.DAY,
+        order_class=OrderClass.MLEG,
+        legs=legs,
+    )
     try:
         order = trading.submit_order(order_data)
         log.info(f"Iron condor order submitted: id={order.id}")
