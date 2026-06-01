@@ -494,8 +494,9 @@ def main():
     max_width = max(k_ps - k_pl, k_cl - k_cs)
     max_loss_per_contract = max_width * 100
     risk_contracts = math.floor((ACCOUNT_RISK_PCT * equity) / max_loss_per_contract)
-    # Cap by actual options buying power (margin ≈ max loss), with a 5% safety buffer.
-    bp_contracts = math.floor((options_bp * 0.95) / max_loss_per_contract)
+    # Cap by actual options buying power. Alpaca's margin runs ~2% above our max-loss
+    # estimate, so use a 10% buffer to stay clear of "insufficient buying power".
+    bp_contracts = math.floor((options_bp * 0.90) / max_loss_per_contract)
     contracts = min(risk_contracts, bp_contracts)
     log.info(f"max_width={max_width:.2f}  max_loss/contract=${max_loss_per_contract:.0f}  "
              f"risk_cap={risk_contracts}  bp_cap={bp_contracts}  → contracts={contracts}")
