@@ -227,23 +227,31 @@ def spread_cost(S, k_ps, k_pl, k_cs, k_cl, T, sigma):
 def place_iron_condor(
     put_short_sym, put_long_sym, call_short_sym, call_long_sym, contracts
 ):
-    """Submit 4-leg iron condor as a single multi-leg order (net credit)."""
-    from alpaca.trading.requests import OptionLeg
-    legs = [
-        OptionLeg(symbol=put_short_sym,  side=OrderSide.SELL, ratio_qty=1),
-        OptionLeg(symbol=put_long_sym,   side=OrderSide.BUY,  ratio_qty=1),
-        OptionLeg(symbol=call_short_sym, side=OrderSide.SELL, ratio_qty=1),
-        OptionLeg(symbol=call_long_sym,  side=OrderSide.BUY,  ratio_qty=1),
-    ]
-    order_data = MarketOrderRequest(
-        qty=contracts,
-        time_in_force=TimeInForce.DAY,
-        order_class=OrderClass.MLEG,
-        legs=legs,
-    )
+    """Submit 4-leg iron condor via REST API (SDK lacks OptionLeg in older versions)."""
+    import requests as _requests
+    url = "https://paper-api.alpaca.markets/v2/orders"
+    headers = {
+        "APCA-API-KEY-ID": API_KEY,
+        "APCA-API-SECRET-KEY": SECRET_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "type": "market",
+        "time_in_force": "day",
+        "order_class": "mleg",
+        "qty": str(contracts),
+        "legs": [
+            {"symbol": put_short_sym,  "side": "sell", "ratio_qty": "1"},
+            {"symbol": put_long_sym,   "side": "buy",  "ratio_qty": "1"},
+            {"symbol": call_short_sym, "side": "sell", "ratio_qty": "1"},
+            {"symbol": call_long_sym,  "side": "buy",  "ratio_qty": "1"},
+        ],
+    }
     try:
-        order = trading.submit_order(order_data)
-        log.info(f"Iron condor order submitted: id={order.id}")
+        resp = _requests.post(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        order = resp.json()
+        log.info(f"Iron condor order submitted: id={order.get('id')}")
         return order
     except Exception as e:
         log.error(f"Order submission failed: {e}")
