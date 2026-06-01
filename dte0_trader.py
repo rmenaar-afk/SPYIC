@@ -249,7 +249,10 @@ def place_iron_condor(
     }
     try:
         resp = _requests.post(url, json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            log.error(f"Order rejected ({resp.status_code}): {resp.text}")
+            log.error(f"Payload sent: {payload}")
+            return None
         order = resp.json()
         log.info(f"Iron condor order submitted: id={order.get('id')}")
         return order
