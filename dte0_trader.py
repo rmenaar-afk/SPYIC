@@ -364,10 +364,24 @@ def main():
         send_email("0DTE Trader: ERROR (empty chain)", f"No option contracts returned for {today}.")
         return
 
-    ps_contract = nearest_strike(chain, k_put_short_ideal,  ContractType.PUT)
-    pl_contract = nearest_strike(chain, k_put_long_ideal,   ContractType.PUT)
-    cs_contract = nearest_strike(chain, k_call_short_ideal, ContractType.CALL)
-    cl_contract = nearest_strike(chain, k_call_long_ideal,  ContractType.CALL)
+    log.info(f"Chain returned {len(chain)} contracts. Sample types: {list({str(c.type) for c in chain[:20]})}")
+
+    # Normalise type comparison — Alpaca may return string or enum
+    def _is_type(contract, ct: ContractType):
+        t = contract.type
+        return t == ct or str(t).upper() in (ct.value.upper(), ct.name.upper())
+
+    def nearest_strike_safe(ch, target, ct):
+        filtered = [c for c in ch if _is_type(c, ct)]
+        log.info(f"  {ct.value} contracts available: {len(filtered)}")
+        if not filtered:
+            return None
+        return min(filtered, key=lambda c: abs(float(c.strike_price) - target))
+
+    ps_contract = nearest_strike_safe(chain, k_put_short_ideal,  ContractType.PUT)
+    pl_contract = nearest_strike_safe(chain, k_put_long_ideal,   ContractType.PUT)
+    cs_contract = nearest_strike_safe(chain, k_call_short_ideal, ContractType.CALL)
+    cl_contract = nearest_strike_safe(chain, k_call_long_ideal,  ContractType.CALL)
 
     if not all([ps_contract, pl_contract, cs_contract, cl_contract]):
         log.error("Could not find all 4 legs in chain.")
