@@ -266,6 +266,69 @@ def place_iron_condor(
         log.error(f"Order submission failed: {e}")
         return None
 
+# ── Alpaca REST helpers (SDK multi-leg support is unreliable) ──────────────────
+ALPACA_PAPER_BASE = "https://paper-api.alpaca.markets"
+
+def _alpaca_headers():
+    return {
+        "APCA-API-KEY-ID": API_KEY,
+        "APCA-API-SECRET-KEY": SECRET_KEY,
+        "Content-Type": "application/json",
+    }
+
+def get_order(order_id):
+    import requests as _requests
+    r = _requests.get(f"{ALPACA_PAPER_BASE}/v2/orders/{order_id}?nested=true",
+                      headers=_alpaca_headers(), timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def wait_for_fill(order_id, timeout_s=180, poll_s=3):
+    """Poll until the entry order fills. Cancel + return None on timeout/terminal."""
+    import requests as _requests
+    deadline = time.time() + timeout_s
+    last_status = None
+    while time.time() < deadline:
+        o = get_order(order_id)
+        status = o.get("status")
+        if status != last_status:
+            log.info(f"Order {order_id} status: {status}")
+            last_status = status
+        if status == "filled":
+            return o
+        if status in ("canceled", "rejected", "expired", "done_for_day", "stopped"):
+            log.error(f"Entry order terminal without fill: {status}")
+            return None
+        time.sleep(poll_s)
+    try:
+        _requests.delete(f"{ALPACA_PAPER_BASE}/v2/orders/{order_id}",
+                         headers=_alpaca_headers(), timeout=30)
+        log.warning("Entry order not filled within timeout — canceled.")
+    except Exception as e:
+        log.warning(f"Cancel after timeout failed: {e}")
+    return None
+
+def net_credit_from_fill(order):
+    """Net credit per share from filled legs: sum(sell fills) - sum(buy fills)."""
+    legs = order.get("legs") or []
+    if not legs:
+        return None
+    credit = 0.0
+    for leg in legs:
+        fp = leg.get("filled_avg_price")
+        if fp is None:
+            return None  # incomplete fill data — caller falls back to model
+        fp = float(fp)
+        credit += fp if leg.get("side") == "sell" else -fp
+    return credit
+
+def get_positions_map():
+    import requests as _requests
+    r = _requests.get(f"{ALPACA_PAPER_BASE}/v2/positions",
+                      headers=_alpaca_headers(), timeout=30)
+    r.raise_for_status()
+    return {p["symbol"]: p for p in r.json()}
+
 def close_position_by_symbol(symbol):
     try:
         trading.close_position(symbol)
@@ -457,87 +520,83 @@ def main():
     )
     send_email(f"0DTE Trader: ENTERED ({contracts} contracts)", entry_email_body)
 
-    # ── 8. Monitor loop ───────────────────────────────────────────────────────
-    profit_target_cost = entry_credit * (1 - PROFIT_TARGET)  # 25% of credit = close here
-    log.info(f"Monitoring until 3PM or profit target (cost <= ${profit_target_cost:.4f}/share)")
+    # ── 8. Confirm the entry actually filled ────────────────────────────────────
+    filled = wait_for_fill(order["id"])
+    if filled is None:
+        send_email("0DTE Trader: NOT FILLED",
+                   f"Entry order {order['id']} did not fill on {today} and was canceled. "
+                   f"No position taken.")
+        return
 
+    actual_credit = net_credit_from_fill(filled)
+    if actual_credit is None or actual_credit <= 0:
+        log.warning(f"Could not read net credit from fill (got {actual_credit}); "
+                    f"falling back to model estimate ${entry_credit:.4f}/share.")
+        actual_credit = entry_credit
+    credit_dollars = actual_credit * 100 * contracts
+    target_profit_dollars = PROFIT_TARGET * credit_dollars
+    log.info(f"FILLED. Net credit ${actual_credit:.4f}/share  (${credit_dollars:.2f} total). "
+             f"Profit target: ${target_profit_dollars:.2f} unrealized.")
+
+    # ── 9. Monitor REAL positions (not a model) ─────────────────────────────────
+    log.info(f"Monitoring until 3:00 PM ET or +${target_profit_dollars:.2f} unrealized.")
     exit_reason = "time"
-    final_cost = None
+    last_unreal = 0.0
 
     while True:
         now = et_now()
-
-        # Force close at EXIT_TIME
         if (now.hour, now.minute) >= EXIT_TIME:
-            log.info("3:00 PM — force closing position.")
+            log.info("3:00 PM ET — force closing position.")
             exit_reason = "time"
             break
 
-        # Current cost to close
-        mins_remaining = (15 * 60 + 0) - (now.hour * 60 + now.minute)  # mins until 3 PM
-        T_now = minutes_to_T(max(mins_remaining, 1))
-
-        # Re-fetch SPY price
         try:
-            req = StockBarsRequest(
-                symbol_or_symbols=[TICKER],
-                timeframe=TimeFrame.Minute,
-                start=now.replace(second=0, microsecond=0) - timedelta(minutes=2),
-            )
-            bars = data_client.get_stock_bars(req).df
-            S_now = float(bars["close"].iloc[-1]) if not bars.empty else S
-        except Exception:
-            S_now = S
+            pos = get_positions_map()
+        except Exception as e:
+            log.warning(f"Position fetch failed: {e}")
+            time.sleep(POLL_SECS)
+            continue
 
-        current_cost = spread_cost(S_now, k_ps, k_pl, k_cs, k_cl, T_now, sigma)
-        pnl_per_share = entry_credit - current_cost
-        pnl_total = pnl_per_share * 100 * contracts
-        pct_profit = pnl_per_share / entry_credit if entry_credit > 0 else 0
+        legs_pos = [pos[s] for s in legs if s in pos]
+        if not legs_pos:
+            log.warning("No legs present in positions yet — retrying.")
+            time.sleep(POLL_SECS)
+            continue
 
-        log.info(
-            f"  {now.strftime('%H:%M')}  SPY={S_now:.2f}  cost={current_cost:.4f}  "
-            f"PnL=${pnl_total:.2f}  ({pct_profit*100:.1f}%)"
-        )
+        last_unreal = sum(float(p.get("unrealized_pl", 0.0)) for p in legs_pos)
+        pct = (last_unreal / credit_dollars * 100) if credit_dollars else 0.0
+        log.info(f"  {now.strftime('%H:%M')}  legs={len(legs_pos)}/4  "
+                 f"unrealized=${last_unreal:.2f}  ({pct:.1f}% of credit)")
 
-        if current_cost <= profit_target_cost:
-            log.info(f"Profit target hit: {pct_profit*100:.1f}% — closing.")
+        if last_unreal >= target_profit_dollars:
+            log.info(f"Profit target hit: ${last_unreal:.2f} >= ${target_profit_dollars:.2f} — closing.")
             exit_reason = "profit_target"
-            final_cost = current_cost
             break
 
         time.sleep(POLL_SECS)
 
-    # ── 9. Close legs ──────────────────────────────────────────────────────────
-    close_all_legs(legs)
-    time.sleep(3)  # brief pause for fill
+    # ── 10. Close all open legs (liquidation) ────────────────────────────────────
+    try:
+        pos = get_positions_map()
+        open_legs = [s for s in legs if s in pos]
+    except Exception:
+        open_legs = legs
+    if open_legs:
+        log.info(f"Closing {len(open_legs)} open legs: {open_legs}")
+        close_all_legs(open_legs)
+    else:
+        log.info("No open legs to close (may have expired or already closed).")
+    time.sleep(5)  # brief pause for closing fills
 
-    # Estimate final P&L
-    if final_cost is None:
-        now = et_now()
-        mins_remaining = max((15 * 60) - (now.hour * 60 + now.minute), 1)
-        T_close = minutes_to_T(mins_remaining)
-        try:
-            req = StockBarsRequest(
-                symbol_or_symbols=[TICKER],
-                timeframe=TimeFrame.Minute,
-                start=now.replace(second=0, microsecond=0) - timedelta(minutes=2),
-            )
-            bars = data_client.get_stock_bars(req).df
-            S_close = float(bars["close"].iloc[-1]) if not bars.empty else S
-        except Exception:
-            S_close = S
-        final_cost = spread_cost(S_close, k_ps, k_pl, k_cs, k_cl, T_close, sigma)
-
-    final_pnl = (entry_credit - final_cost) * 100 * contracts
+    final_pnl = last_unreal  # mark-to-market P&L at exit
     exit_email = (
         f"0DTE Trade closed — {today}\n\n"
         f"Exit reason: {exit_reason}\n"
-        f"Estimated P&L: ${final_pnl:.2f}\n\n"
-        f"Entry credit:  ${entry_credit*100:.2f}/contract\n"
-        f"Exit cost:     ${final_cost*100:.2f}/contract\n"
-        f"Contracts:     {contracts}\n"
+        f"Est. P&L (mark-to-market): ${final_pnl:+.2f}\n\n"
+        f"Net credit collected: ${actual_credit*100:.2f}/contract  (${credit_dollars:.2f} total)\n"
+        f"Contracts: {contracts}\n"
     )
-    log.info(f"Trade closed. Reason={exit_reason}  Est. P&L=${final_pnl:.2f}")
+    log.info(f"Trade closed. Reason={exit_reason}  Est. P&L=${final_pnl:+.2f}")
     send_email(
         f"0DTE Trader: CLOSED ({exit_reason}) est. ${final_pnl:+.2f}",
         exit_email
