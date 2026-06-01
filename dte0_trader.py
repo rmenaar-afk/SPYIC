@@ -114,24 +114,34 @@ def bs_call_delta(S, K, T, r, sigma):
     return norm.cdf(d1)
 
 def strike_for_put_delta(S, T, r, sigma, target_delta):
-    """Find K such that put delta == -target_delta (target_delta positive, e.g. 0.15)."""
+    """Find K such that put delta == -target_delta (target_delta positive, e.g. 0.15).
+
+    For 0DTE the target-delta strike sits very close to spot, so the bracket must
+    reach right up to spot — a hi of S*0.99 is too far OTM and misses the root.
+    """
     def objective(K):
         return bs_put_delta(S, K, T, r, sigma) + target_delta  # want delta == -target
-    lo, hi = S * 0.50, S * 0.99
+    lo, hi = S * 0.50, S * 0.9999
     try:
         return brentq(objective, lo, hi)
     except ValueError:
-        return S * (1 - target_delta * 0.5)
+        log.warning(f"Put strike solve failed (bracket [{lo:.0f},{hi:.0f}]); using ATM fallback.")
+        return S * 0.99
 
 def strike_for_call_delta(S, T, r, sigma, target_delta):
-    """Find K such that call delta == target_delta (e.g. 0.10)."""
+    """Find K such that call delta == target_delta (e.g. 0.10).
+
+    For 0DTE the target-delta strike sits very close to spot, so the bracket must
+    start right at spot.
+    """
     def objective(K):
         return bs_call_delta(S, K, T, r, sigma) - target_delta
-    lo, hi = S * 1.001, S * 1.50
+    lo, hi = S * 1.0001, S * 1.50
     try:
         return brentq(objective, lo, hi)
     except ValueError:
-        return S * (1 + target_delta * 0.5)
+        log.warning(f"Call strike solve failed (bracket [{lo:.0f},{hi:.0f}]); using ATM fallback.")
+        return S * 1.01
 
 def minutes_to_T(mins_remaining):
     return max(mins_remaining / (252.0 * 390.0), 1e-8)
