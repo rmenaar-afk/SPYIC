@@ -181,14 +181,20 @@ def get_account_equity():
 # ── option chain helpers ──────────────────────────────────────────────────────
 
 def fetch_option_chain(expiry: date):
-    """Return list of option contracts for SPY expiring on expiry."""
-    req = GetOptionContractsRequest(
-        underlying_symbols=[TICKER],
-        expiration_date=expiry,
-        status=AssetStatus.ACTIVE,
-    )
-    contracts = trading.get_option_contracts(req)
-    return contracts.option_contracts if hasattr(contracts, "option_contracts") else list(contracts)
+    """Return list of option contracts for SPY expiring on expiry (puts + calls)."""
+    all_contracts = []
+    for ct in (ContractType.PUT, ContractType.CALL):
+        req = GetOptionContractsRequest(
+            underlying_symbols=[TICKER],
+            expiration_date=expiry,
+            status=AssetStatus.ACTIVE,
+            type=ct,
+            limit=1000,
+        )
+        resp = trading.get_option_contracts(req)
+        batch = resp.option_contracts if hasattr(resp, "option_contracts") else list(resp)
+        all_contracts.extend(batch)
+    return all_contracts
 
 def nearest_strike(chain, target_strike, contract_type: ContractType):
     """Find nearest available strike for the given type."""
