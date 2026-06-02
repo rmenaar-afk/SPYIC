@@ -1,0 +1,30 @@
+name: Deploy Dashboard to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'dashboard.html'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:   # allow manual trigger from GitHub UI
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy dashboard.html to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .
+          publish_branch: gh-pages
+          include_files: dashboard.html
+          keep_files: false
+          commit_message: "Deploy dashboard.html [skip ci]"

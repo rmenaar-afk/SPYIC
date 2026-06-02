@@ -47,25 +47,3 @@ jobs:
           name: trade-logs-${{ github.run_id }}
           path: logs/
           retention-days: 30
-
-  pages:
-    runs-on: ubuntu-latest
-    needs: []   # independent of trade job — runs on every push to master
-    if: github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
-
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Deploy dashboard.html to gh-pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
-          publish_branch: gh-pages
-          include_files: dashboard.html
-          keep_files: false
-          commit_message: "Deploy dashboard.html [skip ci]"
