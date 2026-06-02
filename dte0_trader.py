@@ -64,10 +64,13 @@ CALL_DELTA       = 0.10
 PUT_WIDTH        = 10.0    # $
 CALL_WIDTH       = 5.0     # $
 PROFIT_TARGET    = 0.75    # close when 75% of credit collected
-ENTRY_LIMIT_HAIRCUT = 0.20 # first limit = model-mid credit minus this, to improve fills
-ENTRY_CREDIT_FLOOR  = 0.40 # don't chase below this fraction of model-mid credit
-ENTRY_CHASE_STEP    = 0.05 # walk the credit limit down by $0.05/share per attempt
-ENTRY_FILL_WAIT     = 25   # seconds to wait for a fill before re-pricing
+# Alpaca has no market order for multi-leg options, so we enter with a MARKETABLE
+# limit: priced well below model-mid so it crosses the market and fills immediately
+# (a synthetic market order), with a floor to bound worst-case slippage.
+ENTRY_LIMIT_HAIRCUT = 0.50 # first limit = model-mid credit × (1-this); 0.50 = aggressive/marketable
+ENTRY_CREDIT_FLOOR  = 0.30 # never accept less than this fraction of model-mid credit
+ENTRY_CHASE_STEP    = 0.05 # if still unfilled, get more aggressive by $0.05/share per retry
+ENTRY_FILL_WAIT     = 20   # seconds to wait for the marketable fill before retrying
 VIX_MAX          = 17.0
 GAP_MAX          = 0.01    # 1%
 ACCOUNT_RISK_PCT = 0.25    # 25% of equity per day
@@ -536,9 +539,10 @@ def main():
     entry_credit = spread_cost(S, k_ps, k_pl, k_cs, k_cl, T_entry, sigma)
     log.info(f"Estimated entry credit: ${entry_credit:.4f}/share  (${entry_credit*100:.2f}/contract)")
 
-    # ── 7. Submit with a bounded price-chase until filled ───────────────────────
-    # Start near model-mid (minus haircut) and walk the demanded credit down toward
-    # the market until it fills, never below ENTRY_CREDIT_FLOOR of the model credit.
+    # ── 7. Enter via a MARKETABLE limit (Alpaca has no market order for mleg) ────
+    # First limit is already aggressive (≈50% of model-mid) so it crosses the market
+    # and fills immediately like a market order; if not, get more aggressive down to
+    # ENTRY_CREDIT_FLOOR. Never sells the condor below the floor.
     legs = [ps_sym, pl_sym, cs_sym, cl_sym]
     start_credit = max(round(entry_credit * (1 - ENTRY_LIMIT_HAIRCUT), 2), 0.05)
     floor_credit = max(round(entry_credit * ENTRY_CREDIT_FLOOR, 2), 0.05)

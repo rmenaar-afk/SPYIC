@@ -2,7 +2,10 @@ name: 0DTE Iron Condor Trader
 
 on:
   schedule:
-    - cron: '30 14 * * 1-5'   # 9:30 AM ET (UTC-5) Mon–Fri
+    # Fire at 9:30 AM ET (market open); the script then waits to 10:00 ET to enter.
+    # GitHub cron is UTC and has no DST: 13:30 UTC = 9:30 EDT (summer).
+    # In winter (EST) change this to '30 14 * * 1-5' (= 9:30 EST) to avoid a long idle wait.
+    - cron: '30 13 * * 1-5'   # 9:30 AM EDT, Mon–Fri
   workflow_dispatch:            # allow manual trigger from GitHub UI
 
 env:
@@ -11,7 +14,7 @@ env:
 jobs:
   trade:
     runs-on: ubuntu-latest
-    timeout-minutes: 360        # 6 hours max (covers full trading session)
+    timeout-minutes: 420        # 7h: covers 9:30 wake + wait to 10:00 + monitor to 3:00 PM (DST-safe)
 
     env:
       ALPACA_API_KEY:    ${{ secrets.ALPACA_API_KEY }}
