@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mr. Buffet — Trading Dashboard</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0d1117;
+    --surface:   #161b22;
+    --border:    #30363d;
+    --text:      #e6edf3;
+    --muted:     #8b949e;
+    --green:     #3fb950;
+    --red:       #f85149;
+    --yellow:    #d29922;
+    --blue:      #58a6ff;
+    --purple:    #bc8cff;
+    --orange:    #ffa657;
+    --radius:    8px;
+    --mono:      'Courier New', Courier, monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .logo {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--blue);
+    letter-spacing: -0.5px;
+  }
+
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    display: inline-block;
+  }
+  .dot.live { background: var(--green); animation: pulse 2s infinite; }
+  .dot.error { background: var(--red); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+
+  /* API Key form */
+  .key-form {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+
+  .key-form h3 {
+    font-size: 13px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+  }
+
+  .key-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 8px;
+    align-items: end;
+  }
+
+  @media (max-width: 600px) {
+    .key-grid { grid-template-columns: 1fr; }
+  }
+
+  .field label {
+    display: block;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+
+  .field input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 8px 10px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .field input:focus { border-color: var(--blue); }
+
+  .btn {
+    background: var(--blue);
+    color: #000;
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 13px;
+    padding: 8px 18px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: opacity 0.15s;
+    height: 36px;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-sm {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 11px;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .btn-sm:hover { color: var(--text); border-color: var(--text); }
+
+  /* Error banner */
+  .error-banner {
+    background: rgba(248, 81, 73, 0.1);
+    border: 1px solid var(--red);
+    border-radius: var(--radius);
+    color: var(--red);
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    display: none;
+  }
+
+  /* Summary row */
+  .summary-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+
+  .stat-card .label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 6px;
+  }
+
+  .stat-card .value {
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 700;
+  }
+
+  .stat-card .sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .neu { color: var(--text); }
+
+  /* Strategy cards */
+  .section-title {
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .strategy-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+
+  .strat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    border-left: 3px solid;
+  }
+
+  .strat-card[data-strat="0DTE IC"]    { border-left-color: var(--orange); }
+  .strat-card[data-strat="LEAP"]       { border-left-color: var(--purple); }
+  .strat-card[data-strat="Breakout"]   { border-left-color: var(--blue); }
+  .strat-card[data-strat="Other"]      { border-left-color: var(--muted); }
+
+  .strat-name {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
+  .strat-card[data-strat="0DTE IC"]  .strat-name { color: var(--orange); }
+  .strat-card[data-strat="LEAP"]     .strat-name { color: var(--purple); }
+  .strat-card[data-strat="Breakout"] .strat-name { color: var(--blue); }
+  .strat-card[data-strat="Other"]    .strat-name { color: var(--muted); }
+
+  .strat-pnl {
+    font-family: var(--mono);
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+
+  .strat-meta {
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  /* Tables */
+  .table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 20px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  thead th {
+    background: var(--bg);
+    padding: 10px 12px;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  thead th:hover { color: var(--text); }
+  thead th.sort-asc::after  { content: ' ↑'; }
+  thead th.sort-desc::after { content: ' ↓'; }
+
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+  }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: rgba(255,255,255,0.03); }
+
+  td {
+    padding: 9px 12px;
+    font-family: var(--mono);
+    white-space: nowrap;
+  }
+
+  .tag {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    font-family: -apple-system, sans-serif;
+    letter-spacing: 0.3px;
+  }
+
+  .tag-0DTE    { background: rgba(255,166,87,0.15); color: var(--orange); }
+  .tag-LEAP    { background: rgba(188,140,255,0.15); color: var(--purple); }
+  .tag-Breakout{ background: rgba(88,166,255,0.15);  color: var(--blue); }
+  .tag-Other   { background: rgba(139,148,158,0.15); color: var(--muted); }
+
+  .side-buy  { color: var(--green); }
+  .side-sell { color: var(--red); }
+
+  /* Skeleton / loading */
+  .skeleton {
+    background: linear-gradient(90deg, var(--surface) 25%, var(--border) 50%, var(--surface) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.4s infinite;
+    border-radius: 4px;
+    height: 1em;
+    display: inline-block;
+    width: 80px;
+  }
+
+  @keyframes shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  .empty-row td {
+    text-align: center;
+    color: var(--muted);
+    padding: 24px;
+    font-family: -apple-system, sans-serif;
+  }
+
+  footer {
+    text-align: center;
+    padding: 20px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Mr. Buffet</div>
+  <div class="status-bar">
+    <span class="dot" id="dot"></span>
+    <span id="status-text">Not connected</span>
+    <span id="last-refresh"></span>
+  </div>
+</header>
+
+<main>
+  <!-- API Key Form -->
+  <div class="key-form" id="key-form">
+    <h3>Alpaca Paper API Credentials</h3>
+    <div class="key-grid">
+      <div class="field">
+        <label>Key ID</label>
+        <input type="text" id="api-key" placeholder="PKXXXXXXXXXXXXXX" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label>Secret Key</label>
+        <input type="password" id="api-secret" placeholder="••••••••••••••••••••••••••••••••" autocomplete="off">
+      </div>
+      <button class="btn" id="connect-btn" onclick="connect()">Connect</button>
+    </div>
+    <p style="margin-top:10px;font-size:11px;color:var(--muted)">
+      Keys are stored only in memory and sent exclusively to <code style="color:var(--blue)">paper-api.alpaca.markets</code>.
+    </p>
+  </div>
+
+  <!-- Error -->
+  <div class="error-banner" id="error-banner"></div>
+
+  <!-- Summary -->
+  <div class="section-title">
+    <span>Account Overview</span>
+    <button class="btn-sm" id="refresh-btn" onclick="refreshAll()" style="display:none">Refresh</button>
+  </div>
+  <div class="summary-row" id="summary-row">
+    <div class="stat-card"><div class="label">Equity</div><div class="value neu" id="equity">—</div></div>
+    <div class="stat-card"><div class="label">Cash</div><div class="value neu" id="cash">—</div></div>
+    <div class="stat-card"><div class="label">Buying Power</div><div class="value neu" id="bp">—</div></div>
+    <div class="stat-card"><div class="label">Day P&amp;L</div><div class="value" id="day-pnl">—</div><div class="sub" id="day-pnl-sub"></div></div>
+    <div class="stat-card"><div class="label">Unrealized P&amp;L</div><div class="value" id="unreal-pnl">—</div></div>
+  </div>
+
+  <!-- Strategy Cards -->
+  <div class="section-title"><span>Strategy Breakdown</span></div>
+  <div class="strategy-row" id="strategy-row"></div>
+
+  <!-- Positions Table -->
+  <div class="section-title"><span>Open Positions</span></div>
+  <div class="table-wrap">
+    <table id="positions-table">
+      <thead>
+        <tr>
+          <th onclick="sortTable('positions', 0)">Symbol</th>
+          <th onclick="sortTable('positions', 1)">Strategy</th>
+          <th onclick="sortTable('positions', 2)">Qty</th>
+          <th onclick="sortTable('positions', 3)">Avg Entry</th>
+          <th onclick="sortTable('positions', 4)">Current</th>
+          <th onclick="sortTable('positions', 5)">Unreal P&amp;L</th>
+          <th onclick="sortTable('positions', 6)">% Chg</th>
+          <th onclick="sortTable('positions', 7)">DTE</th>
+        </tr>
+      </thead>
+      <tbody id="positions-body">
+        <tr class="empty-row"><td colspan="8">Connect to see positions</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Recent Trades Table -->
+  <div class="section-title"><span>Recent Closed Trades (30 days)</span></div>
+  <div class="table-wrap">
+    <table id="orders-table">
+      <thead>
+        <tr>
+          <th onclick="sortTable('orders', 0)">Symbol</th>
+          <th onclick="sortTable('orders', 1)">Strategy</th>
+          <th onclick="sortTable('orders', 2)">Side</th>
+          <th onclick="sortTable('orders', 3)">Qty</th>
+          <th onclick="sortTable('orders', 4)">Fill Price</th>
+          <th onclick="sortTable('orders', 5)">P&amp;L Est.</th>
+          <th onclick="sortTable('orders', 6)">Filled At</th>
+        </tr>
+      </thead>
+      <tbody id="orders-body">
+        <tr class="empty-row"><td colspan="7">Connect to see trades</td></tr>
+      </tbody>
+    </table>
+  </div>
+</main>
+
+<footer>Paper trading dashboard — data from Alpaca Markets · auto-refreshes every 60s</footer>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+const BASE = 'https://paper-api.alpaca.markets';
+let apiKey = '', apiSecret = '';
+let refreshTimer = null;
+let positions = [], orders = [];
+let sortState = { positions: { col: 5, dir: -1 }, orders: { col: 6, dir: -1 } };
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+function fmt(n, decimals = 2) {
+  if (n == null || isNaN(n)) return '—';
+  return Number(n).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
+function fmtMoney(n) {
+  if (n == null || isNaN(n)) return '—';
+  const v = Number(n);
+  const sign = v >= 0 ? '+' : '';
+  return sign + '$' + fmt(Math.abs(v));
+}
+
+function fmtMoneyPlain(n) {
+  if (n == null || isNaN(n)) return '—';
+  return '$' + fmt(Math.abs(Number(n)));
+}
+
+function colorClass(n) {
+  const v = Number(n);
+  if (v > 0) return 'pos';
+  if (v < 0) return 'neg';
+  return 'neu';
+}
+
+function setStatus(state, text) {
+  const dot = $('dot');
+  dot.className = 'dot ' + (state === 'live' ? 'live' : state === 'error' ? 'error' : '');
+  $('status-text').textContent = text;
+}
+
+function showError(msg) {
+  const el = $('error-banner');
+  el.textContent = msg;
+  el.style.display = msg ? 'block' : 'none';
+}
+
+// ─── Strategy Tagging ─────────────────────────────────────────────────────────
+function parseDTE(symbol) {
+  // Options symbols: e.g. SPY250601C00500000
+  const m = symbol.match(/(\d{6})[CP]/);
+  if (!m) return null;
+  const y = 2000 + parseInt(m[1].slice(0,2));
+  const mo = parseInt(m[1].slice(2,4)) - 1;
+  const d = parseInt(m[1].slice(4,6));
+  const exp = new Date(y, mo, d);
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  return Math.round((exp - today) / 86400000);
+}
+
+function tagSymbol(symbol) {
+  if (!symbol) return 'Other';
+  const s = symbol.toUpperCase();
+  const leapEtfs = ['SPY','QQQ','TQQQ','UPRO'];
+  // Is it an option?
+  const isOption = /\d{6}[CP]\d{8}$/.test(s);
+  if (isOption) {
+    const dte = parseDTE(s);
+    const underlying = s.replace(/\d{6}[CP]\d{8}$/, '').trim();
+    if (underlying === 'SPY' && dte !== null && dte <= 1) return '0DTE IC';
+    if (leapEtfs.includes(underlying) && dte !== null && dte > 90) return 'LEAP';
+    return 'Other';
+  }
+  // Equity / ETF
+  return 'Breakout';
+}
+
+// ─── API ──────────────────────────────────────────────────────────────────────
+async function alpacaFetch(path) {
+  const res = await fetch(BASE + path, {
+    headers: {
+      'APCA-API-Key-ID': apiKey,
+      'APCA-API-Secret-Key': apiSecret
+    }
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${res.status} ${res.statusText}: ${body}`);
+  }
+  return res.json();
+}
+
+// ─── Render ──────────────────────────────────────────────────────────────────
+function renderAccount(acct) {
+  const equity    = parseFloat(acct.equity);
+  const lastEquity= parseFloat(acct.last_equity);
+  const cash      = parseFloat(acct.cash);
+  const bp        = parseFloat(acct.buying_power);
+  const dayPnl    = equity - lastEquity;
+  const dayPct    = lastEquity ? (dayPnl / lastEquity * 100) : 0;
+
+  $('equity').textContent = '$' + fmt(equity);
+  $('cash').textContent   = '$' + fmt(cash);
+  $('bp').textContent     = '$' + fmt(bp);
+
+  const dpEl = $('day-pnl');
+  dpEl.textContent  = fmtMoney(dayPnl);
+  dpEl.className    = 'value ' + colorClass(dayPnl);
+  $('day-pnl-sub').textContent = fmt(dayPct) + '%';
+
+  // Unrealized from positions (summed separately)
+  const totalUnreal = positions.reduce((s, p) => s + parseFloat(p.unrealized_pl || 0), 0);
+  const upEl = $('unreal-pnl');
+  upEl.textContent = fmtMoney(totalUnreal);
+  upEl.className   = 'value ' + colorClass(totalUnreal);
+}
+
+function renderStrategies() {
+  const buckets = { '0DTE IC': { pnl: 0, count: 0 }, 'LEAP': { pnl: 0, count: 0 }, 'Breakout': { pnl: 0, count: 0 }, 'Other': { pnl: 0, count: 0 } };
+  positions.forEach(p => {
+    const tag = tagSymbol(p.symbol);
+    buckets[tag].pnl   += parseFloat(p.unrealized_pl || 0);
+    buckets[tag].count += 1;
+  });
+
+  const row = $('strategy-row');
+  row.innerHTML = Object.entries(buckets).map(([name, b]) => `
+    <div class="strat-card" data-strat="${name}">
+      <div class="strat-name">${name}</div>
+      <div class="strat-pnl ${colorClass(b.pnl)}">${fmtMoney(b.pnl)}</div>
+      <div class="strat-meta">${b.count} open position${b.count !== 1 ? 's' : ''}</div>
+    </div>
+  `).join('');
+}
+
+function renderPositions() {
+  const tbody = $('positions-body');
+  if (!positions.length) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="8">No open positions</td></tr>';
+    return;
+  }
+
+  const sorted = [...positions];
+  const { col, dir } = sortState.positions;
+  sorted.sort((a, b) => {
+    const av = posColValue(a, col);
+    const bv = posColValue(b, col);
+    if (av < bv) return -dir;
+    if (av > bv) return dir;
+    return 0;
+  });
+
+  tbody.innerHTML = sorted.map(p => {
+    const tag    = tagSymbol(p.symbol);
+    const unreal = parseFloat(p.unrealized_pl);
+    const pct    = parseFloat(p.unrealized_plpc) * 100;
+    const dte    = parseDTE(p.symbol);
+    const dteStr = dte !== null ? String(dte) : '—';
+    return `<tr>
+      <td>${p.symbol}</td>
+      <td><span class="tag tag-${tag.replace(' ','')}">${tag}</span></td>
+      <td>${fmt(p.qty, 0)}</td>
+      <td>$${fmt(p.avg_entry_price)}</td>
+      <td>$${fmt(p.current_price)}</td>
+      <td class="${colorClass(unreal)}">${fmtMoney(unreal)}</td>
+      <td class="${colorClass(pct)}">${fmt(pct)}%</td>
+      <td>${dteStr}</td>
+    </tr>`;
+  }).join('');
+}
+
+function posColValue(p, col) {
+  switch(col) {
+    case 0: return p.symbol;
+    case 1: return tagSymbol(p.symbol);
+    case 2: return parseFloat(p.qty);
+    case 3: return parseFloat(p.avg_entry_price);
+    case 4: return parseFloat(p.current_price);
+    case 5: return parseFloat(p.unrealized_pl);
+    case 6: return parseFloat(p.unrealized_plpc);
+    case 7: return parseDTE(p.symbol) ?? 9999;
+    default: return 0;
+  }
+}
+
+function renderOrders() {
+  const tbody = $('orders-body');
+  const filled = orders.filter(o => o.status === 'filled' && o.filled_avg_price);
+  if (!filled.length) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No recent closed trades</td></tr>';
+    return;
+  }
+
+  // Group legs of multi-leg orders by client_order_id prefix or by leg
+  // For simplicity render each filled order; P&L is directional estimate
+  const sorted = [...filled];
+  const { col, dir } = sortState.orders;
+  sorted.sort((a, b) => {
+    const av = ordColValue(a, col);
+    const bv = ordColValue(b, col);
+    if (av < bv) return -dir;
+    if (av > bv) return dir;
+    return 0;
+  });
+
+  tbody.innerHTML = sorted.map(o => {
+    const tag   = tagSymbol(o.symbol);
+    const price = parseFloat(o.filled_avg_price);
+    const qty   = parseFloat(o.filled_qty);
+    // Very rough P&L: for closing trades side=sell means + for long
+    // We can't know original cost without tracking; show '—' for opens
+    const filledAt = o.filled_at ? new Date(o.filled_at).toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '—';
+    const sideClass = o.side === 'buy' ? 'side-buy' : 'side-sell';
+    return `<tr>
+      <td>${o.symbol}</td>
+      <td><span class="tag tag-${tag.replace(' ','')}">${tag}</span></td>
+      <td class="${sideClass}">${o.side.toUpperCase()}</td>
+      <td>${fmt(qty, 0)}</td>
+      <td>$${fmt(price)}</td>
+      <td>—</td>
+      <td>${filledAt}</td>
+    </tr>`;
+  }).join('');
+}
+
+function ordColValue(o, col) {
+  switch(col) {
+    case 0: return o.symbol;
+    case 1: return tagSymbol(o.symbol);
+    case 2: return o.side;
+    case 3: return parseFloat(o.filled_qty);
+    case 4: return parseFloat(o.filled_avg_price || 0);
+    case 5: return 0;
+    case 6: return o.filled_at || '';
+    default: return 0;
+  }
+}
+
+function updateSortHeaders(tableId, col) {
+  const table = document.getElementById(tableId + '-table');
+  const headers = table.querySelectorAll('thead th');
+  headers.forEach((th, i) => {
+    th.classList.remove('sort-asc','sort-desc');
+    if (i === col) {
+      th.classList.add(sortState[tableId].dir === 1 ? 'sort-asc' : 'sort-desc');
+    }
+  });
+}
+
+function sortTable(tableId, col) {
+  const s = sortState[tableId];
+  if (s.col === col) {
+    s.dir *= -1;
+  } else {
+    s.col = col;
+    s.dir = -1;
+  }
+  updateSortHeaders(tableId, col);
+  if (tableId === 'positions') renderPositions();
+  else renderOrders();
+}
+
+// ─── Data Fetch ───────────────────────────────────────────────────────────────
+async function refreshAll() {
+  if (!apiKey || !apiSecret) return;
+  showError('');
+  setStatus('live', 'Loading…');
+
+  try {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
+    const [acct, pos, ord] = await Promise.all([
+      alpacaFetch('/v2/account'),
+      alpacaFetch('/v2/positions'),
+      alpacaFetch(`/v2/orders?status=closed&limit=100&after=${thirtyDaysAgo}`)
+    ]);
+
+    positions = pos;
+    orders = ord;
+
+    renderAccount(acct);
+    renderStrategies();
+    renderPositions();
+    renderOrders();
+    updateSortHeaders('positions', sortState.positions.col);
+    updateSortHeaders('orders', sortState.orders.col);
+
+    const now = new Date().toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    $('last-refresh').textContent = 'Updated ' + now;
+    setStatus('live', 'Connected · Paper');
+  } catch (err) {
+    setStatus('error', 'Fetch failed');
+    showError('API error: ' + err.message);
+  }
+}
+
+function scheduleRefresh() {
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(refreshAll, 60000);
+}
+
+// ─── Connect ──────────────────────────────────────────────────────────────────
+async function connect() {
+  const k = $('api-key').value.trim();
+  const s = $('api-secret').value.trim();
+  if (!k || !s) { showError('Enter both API Key ID and Secret Key.'); return; }
+
+  apiKey = k;
+  apiSecret = s;
+
+  const btn = $('connect-btn');
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
+  showError('');
+
+  try {
+    await refreshAll();
+    $('key-form').style.display = 'none';
+    $('refresh-btn').style.display = '';
+    scheduleRefresh();
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = 'Connect';
+  }
+}
+
+// Allow Enter key in form
+[$('api-key'), $('api-secret')].forEach(el => {
+  el.addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
+});
+</script>
+</body>
+</html>

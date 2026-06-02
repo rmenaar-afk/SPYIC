@@ -1,0 +1,26 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Logs & data
+logs/
+data/
+results/
+scanner_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Office docs (not source code)
+*.docx
+*.xlsx
+*.pptx
+
+# Plugin bundle
+*.plugin
