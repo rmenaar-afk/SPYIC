@@ -1,0 +1,47 @@
+name: Breakout Scanner
+
+on:
+  schedule:
+    - cron: '0 21 * * 1-5'    # 4:00 PM ET (UTC-5) Mon–Fri — runs after market close
+  workflow_dispatch:            # allow manual trigger from GitHub UI
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      ALPACA_API_KEY:    ${{ secrets.ALPACA_API_KEY }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      GMAIL_USER:        ${{ secrets.GMAIL_USER }}
+      GMAIL_APP_PASS:    ${{ secrets.GMAIL_APP_PASS }}
+      NOTIFY_EMAIL:      ${{ secrets.NOTIFY_EMAIL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run breakout scanner
+        run: python breakout_scanner.py
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scanner-results-${{ github.run_id }}
+          path: |
+            results/
+            *.csv
+          if-no-files-found: ignore
+          retention-days: 30

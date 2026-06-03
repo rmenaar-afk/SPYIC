@@ -43,8 +43,8 @@ from alpaca.trading.enums import (
     ContractType,
     PositionSide,
 )
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.historical import StockHistoricalDataClient, OptionHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, OptionLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
 
 # ── config ────────────────────────────────────────────────────────────────────
@@ -95,6 +95,7 @@ log = logging.getLogger(__name__)
 # ── Alpaca clients ─────────────────────────────────────────────────────────────
 trading = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
+opt_data_client = OptionHistoricalDataClient(API_KEY, SECRET_KEY)
 
 # ── Black-Scholes helpers ─────────────────────────────────────────────────────
 
@@ -240,6 +241,22 @@ def spread_cost(S, k_ps, k_pl, k_cs, k_cl, T, sigma):
     pcs_cost = bs_put_price(S, k_ps, T, RISK_FREE, sigma) - bs_put_price(S, k_pl, T, RISK_FREE, sigma)
     ccs_cost = bs_call_price(S, k_cs, T, RISK_FREE, sigma) - bs_call_price(S, k_cl, T, RISK_FREE, sigma)
     return max(pcs_cost + ccs_cost, 0.0)
+
+def get_option_quotes(symbols: list) -> dict:
+    """Fetch live bid/ask/mid quotes for option symbols. Returns {} on failure."""
+    try:
+        req = OptionLatestQuoteRequest(symbol_or_symbols=symbols)
+        raw = opt_data_client.get_option_latest_quote(req)
+        result = {}
+        for sym, q in raw.items():
+            bid = float(q.bid_price or 0)
+            ask = float(q.ask_price or 0)
+            mid = (bid + ask) / 2.0 if (bid > 0 or ask > 0) else 0.0
+            result[sym] = {"bid": bid, "ask": ask, "mid": mid}
+        return result
+    except Exception as e:
+        log.warning(f"Option quote fetch failed: {e}")
+        return {}
 
 # ── order placement ───────────────────────────────────────────────────────────
 
@@ -535,17 +552,33 @@ def main():
                    f"Check for leftover open positions on {today}.")
         return
 
-    # ── 6. Calculate entry credit (BS model) ─────────────────────────────────
-    entry_credit = spread_cost(S, k_ps, k_pl, k_cs, k_cl, T_entry, sigma)
-    log.info(f"Estimated entry credit: ${entry_credit:.4f}/share  (${entry_credit*100:.2f}/contract)")
+    # ── 6. Calculate entry credit (live quotes, BS as fallback) ──────────────
+    bs_entry_credit = spread_cost(S, k_ps, k_pl, k_cs, k_cl, T_entry, sigma)
+    log.info(f"BS model estimate: ${bs_entry_credit:.4f}/share  (${bs_entry_credit*100:.2f}/contract)")
+
+    entry_quotes = get_option_quotes([ps_sym, pl_sym, cs_sym, cl_sym])
+    if all(entry_quotes.get(s, {}).get("mid", 0) > 0 for s in [ps_sym, pl_sym, cs_sym, cl_sym]):
+        market_mid_credit = ((entry_quotes[ps_sym]["mid"] - entry_quotes[pl_sym]["mid"]) +
+                             (entry_quotes[cs_sym]["mid"] - entry_quotes[cl_sym]["mid"]))
+        log.info(f"Live market mid credit: ${market_mid_credit:.4f}/share  "
+                 f"(${market_mid_credit*100:.2f}/contract)")
+        entry_credit = market_mid_credit
+    else:
+        log.warning("Some option quotes missing/zero — falling back to BS estimate for entry pricing.")
+        market_mid_credit = None
+        entry_credit = bs_entry_credit
 
     # ── 7. Enter via a MARKETABLE limit (Alpaca has no market order for mleg) ────
-    # First limit is already aggressive (≈50% of model-mid) so it crosses the market
-    # and fills immediately like a market order; if not, get more aggressive down to
-    # ENTRY_CREDIT_FLOOR. Never sells the condor below the floor.
+    # With live quotes: start $0.05 below market mid for a fast fill.
+    # With BS fallback: use 50% haircut to make the order marketable.
+    # Chase down to ENTRY_CREDIT_FLOOR if not filled on first try.
     legs = [ps_sym, pl_sym, cs_sym, cl_sym]
-    start_credit = max(round(entry_credit * (1 - ENTRY_LIMIT_HAIRCUT), 2), 0.05)
-    floor_credit = max(round(entry_credit * ENTRY_CREDIT_FLOOR, 2), 0.05)
+    if market_mid_credit is not None:
+        start_credit = max(round(market_mid_credit - 0.05, 2), 0.05)
+        floor_credit = max(round(market_mid_credit * ENTRY_CREDIT_FLOOR, 2), 0.05)
+    else:
+        start_credit = max(round(entry_credit * (1 - ENTRY_LIMIT_HAIRCUT), 2), 0.05)
+        floor_credit = max(round(entry_credit * ENTRY_CREDIT_FLOOR, 2), 0.05)
     attempt = start_credit
     filled = None
     while attempt >= floor_credit - 1e-9:
@@ -573,6 +606,13 @@ def main():
                     f"falling back to model estimate ${entry_credit:.4f}/share.")
         actual_credit = entry_credit
 
+    mkt_credit_line = (
+        f"Mkt mid credit: ${market_mid_credit*100:.2f}/contract  "
+        f"(BS est: ${bs_entry_credit*100:.2f}/contract)\n"
+        if market_mid_credit is not None else
+        f"BS est. credit:  ${bs_entry_credit*100:.2f}/contract  "
+        f"(live quotes unavailable)\n"
+    )
     entry_email_body = (
         f"Iron condor FILLED on {today}\n\n"
         f"SPY @ {S:.2f}\n"
@@ -580,7 +620,9 @@ def main():
         f"Contracts: {contracts}\n\n"
         f"Put spread:  {k_ps:.0f}/{k_pl:.0f}  [{ps_sym}]\n"
         f"Call spread: {k_cs:.0f}/{k_cl:.0f}  [{cs_sym}]\n\n"
-        f"Net credit:  ${actual_credit*100:.2f}/contract  (${actual_credit*100*contracts:.2f} total)\n"
+        + mkt_credit_line
+        + f"Net credit:  ${actual_credit*100:.2f}/contract  "
+        f"(${actual_credit*100*contracts:.2f} total)\n"
         f"Max risk:    ${max_loss_per_contract*contracts:.2f}\n"
     )
     send_email(f"0DTE Trader: ENTERED ({contracts} contracts)", entry_email_body)
@@ -589,7 +631,7 @@ def main():
     log.info(f"FILLED. Net credit ${actual_credit:.4f}/share  (${credit_dollars:.2f} total). "
              f"Profit target: ${target_profit_dollars:.2f} unrealized.")
 
-    # ── 9. Monitor REAL positions (not a model) ─────────────────────────────────
+    # ── 9. Monitor via live option quotes (fallback: position P&L) ──────────────
     log.info(f"Monitoring until 3:00 PM ET or +${target_profit_dollars:.2f} unrealized.")
     exit_reason = "time"
     last_unreal = 0.0
@@ -601,23 +643,34 @@ def main():
             exit_reason = "time"
             break
 
-        try:
-            pos = get_positions_map()
-        except Exception as e:
-            log.warning(f"Position fetch failed: {e}")
-            time.sleep(POLL_SECS)
-            continue
+        # Primary: live option quotes for current spread cost
+        live_q = get_option_quotes([ps_sym, pl_sym, cs_sym, cl_sym])
+        if all(live_q.get(s, {}).get("mid", 0) > 0 for s in [ps_sym, pl_sym, cs_sym, cl_sym]):
+            current_cost = ((live_q[ps_sym]["mid"] - live_q[pl_sym]["mid"]) +
+                            (live_q[cs_sym]["mid"] - live_q[cl_sym]["mid"]))
+            last_unreal = (actual_credit - current_cost) * 100 * contracts
+            pct = (last_unreal / credit_dollars * 100) if credit_dollars else 0.0
+            log.info(f"  {now.strftime('%H:%M')}  (quotes)  cost=${current_cost:.4f}  "
+                     f"unrealized=${last_unreal:.2f}  ({pct:.1f}% of credit)")
+        else:
+            # Fallback: Alpaca position P&L
+            try:
+                pos = get_positions_map()
+            except Exception as e:
+                log.warning(f"Quote fetch failed and position fetch failed: {e}")
+                time.sleep(POLL_SECS)
+                continue
 
-        legs_pos = [pos[s] for s in legs if s in pos]
-        if not legs_pos:
-            log.warning("No legs present in positions yet — retrying.")
-            time.sleep(POLL_SECS)
-            continue
+            legs_pos = [pos[s] for s in legs if s in pos]
+            if not legs_pos:
+                log.warning("No quotes and no legs in positions yet — retrying.")
+                time.sleep(POLL_SECS)
+                continue
 
-        last_unreal = sum(float(p.get("unrealized_pl", 0.0)) for p in legs_pos)
-        pct = (last_unreal / credit_dollars * 100) if credit_dollars else 0.0
-        log.info(f"  {now.strftime('%H:%M')}  legs={len(legs_pos)}/4  "
-                 f"unrealized=${last_unreal:.2f}  ({pct:.1f}% of credit)")
+            last_unreal = sum(float(p.get("unrealized_pl", 0.0)) for p in legs_pos)
+            pct = (last_unreal / credit_dollars * 100) if credit_dollars else 0.0
+            log.info(f"  {now.strftime('%H:%M')}  (positions fallback)  legs={len(legs_pos)}/4  "
+                     f"unrealized=${last_unreal:.2f}  ({pct:.1f}% of credit)")
 
         if last_unreal >= target_profit_dollars:
             log.info(f"Profit target hit: ${last_unreal:.2f} >= ${target_profit_dollars:.2f} — closing.")
