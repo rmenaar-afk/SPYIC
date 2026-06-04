@@ -1,16 +1,26 @@
 """
 dte0_trader.py — Automated 0DTE SPY Iron Condor Trader (Alpaca Paper)
 
-Strategy (from backtest):
+Strategy:
   - PCS: 0.15-delta put, 10-wide
   - CCS: 0.10-delta call, 5-wide
   - Entry: 10:00 AM ET
-  - Exit:  75% profit target OR 3:00 PM ET force-close
+  - Exit:  75% take-profit (resting buy-back order) OR 3:00 PM ET force-close
   - Filters: VIX < 17 AND gap < 1% from prior close
 
 Sizing: 25% of account equity per day
   contracts = floor(0.25 * equity / (max_spread_width * 100))
   max_spread_width = 10 (put spread is the wider leg)
+
+Run modes (python dte0_trader.py <mode>):
+  entry  — wait to 10:00 ET, apply filters, enter the condor, attach the 75% TP.
+  close  — wake ~1h before the close, cancel the TP, flatten anything still open.
+  all    — (default) entry then close in one process; for local/manual runs.
+
+In production each mode runs as its own short GitHub Actions job
+(.github/workflows/dte0_entry.yml, dte0_close.yml). Splitting them keeps each job
+far from GitHub's 6-hour cap and lets the entry fire hours early to absorb the
+scheduler's jitter while still entering exactly at the open.
 """
 
 import sys
@@ -63,7 +73,7 @@ PUT_DELTA        = 0.15
 CALL_DELTA       = 0.10
 PUT_WIDTH        = 10.0    # $
 CALL_WIDTH       = 5.0     # $
-PROFIT_TARGET    = 0.75    # close when 75% of credit collected
+PROFIT_TARGET    = 0.75    # take profit at 75% of credit (resting buy-back order)
 # Alpaca has no market order for multi-leg options, so we enter with a MARKETABLE
 # limit: priced well below model-mid so it crosses the market and fills immediately
 # (a synthetic market order), with a floor to bound worst-case slippage.
@@ -76,8 +86,8 @@ GAP_MAX          = 0.01    # 1%
 ACCOUNT_RISK_PCT = 0.25    # 25% of equity per day
 RISK_FREE        = 0.04
 ENTRY_TIME       = (10, 0)   # 10:00 AM ET
-EXIT_TIME        = (15, 0)   # 3:00 PM ET
-POLL_SECS        = 60        # check P&L every 60 seconds
+EXIT_TIME        = (15, 0)   # 3:00 PM ET — 1 hour before the 4:00 PM close
+POLL_SECS        = 60        # check P&L every 60 seconds (only used by --mode all)
 
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -301,6 +311,47 @@ def place_iron_condor(
         log.error(f"Order submission failed: {e}")
         return None
 
+def place_take_profit(
+    put_short_sym, put_long_sym, call_short_sym, call_long_sym, contracts, debit_limit
+):
+    """Submit a resting CLOSING mleg limit order = take-profit at PROFIT_TARGET.
+
+    This buys the iron condor back: buy_to_close the two shorts, sell_to_close the
+    two longs. It is a NET DEBIT, so limit_price is the positive maximum debit we
+    will pay (= PROFIT_TARGET-adjusted fraction of the credit). The order rests
+    (TIF=day) and fills the moment the condor can be bought back for <= that debit,
+    i.e. once PROFIT_TARGET of the credit has decayed away. Direction (debit) is
+    inferred by Alpaca from the legs; limit_price stays positive.
+    """
+    import requests as _requests
+    url = f"{ALPACA_PAPER_BASE}/v2/orders"
+    payload = {
+        "type": "limit",
+        "time_in_force": "day",
+        "order_class": "mleg",
+        "qty": str(contracts),
+        "limit_price": f"{debit_limit:.2f}",
+        "legs": [
+            {"symbol": put_short_sym,  "side": "buy",  "ratio_qty": "1", "position_intent": "buy_to_close"},
+            {"symbol": put_long_sym,   "side": "sell", "ratio_qty": "1", "position_intent": "sell_to_close"},
+            {"symbol": call_short_sym, "side": "buy",  "ratio_qty": "1", "position_intent": "buy_to_close"},
+            {"symbol": call_long_sym,  "side": "sell", "ratio_qty": "1", "position_intent": "sell_to_close"},
+        ],
+    }
+    try:
+        resp = _requests.post(url, json=payload, headers=_alpaca_headers(), timeout=30)
+        if resp.status_code >= 400:
+            log.error(f"Take-profit order rejected ({resp.status_code}): {resp.text}")
+            log.error(f"Payload sent: {payload}")
+            return None
+        order = resp.json()
+        log.info(f"Take-profit (buy-back) order submitted: id={order.get('id')}  "
+                 f"debit_limit=${debit_limit:.2f}/share")
+        return order
+    except Exception as e:
+        log.error(f"Take-profit order submission failed: {e}")
+        return None
+
 # ── Alpaca REST helpers (SDK multi-leg support is unreliable) ──────────────────
 ALPACA_PAPER_BASE = "https://paper-api.alpaca.markets"
 
@@ -383,6 +434,58 @@ def close_all_legs(legs):
     for sym in legs:
         close_position_by_symbol(sym)
 
+def list_open_orders():
+    """Return all open orders (nested, so mleg legs are visible)."""
+    import requests as _requests
+    r = _requests.get(f"{ALPACA_PAPER_BASE}/v2/orders?status=open&nested=true",
+                      headers=_alpaca_headers(), timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def cancel_order_by_id(order_id):
+    import requests as _requests
+    try:
+        _requests.delete(f"{ALPACA_PAPER_BASE}/v2/orders/{order_id}",
+                         headers=_alpaca_headers(), timeout=30)
+        log.info(f"Canceled order {order_id}")
+    except Exception as e:
+        log.warning(f"Cancel order {order_id} failed (may already be terminal): {e}")
+
+def cancel_open_orders_for(symbols):
+    """Cancel any open order that touches one of `symbols` (e.g. the resting TP).
+
+    Must run before flattening: Alpaca rejects close_position while a working
+    order exists on that symbol. Only cancels orders whose legs intersect our
+    leg set, so other strategies on the account are left untouched.
+    """
+    sym_set = set(symbols)
+    try:
+        orders = list_open_orders()
+    except Exception as e:
+        log.warning(f"Could not list open orders to cancel: {e}")
+        return
+    for o in orders:
+        o_syms = {o.get("symbol")} | {l.get("symbol") for l in (o.get("legs") or [])}
+        if o_syms & sym_set:
+            cancel_order_by_id(o["id"])
+
+def find_open_condor_legs():
+    """For the close job: return option-leg symbols currently held (our SPY 0DTE
+    condor), reconstructed from Alpaca positions. Empty if nothing is open
+    (e.g. the take-profit already filled)."""
+    try:
+        pos = get_positions_map()
+    except Exception as e:
+        log.warning(f"Position fetch failed during close: {e}")
+        return []
+    today_occ = date.today().strftime("%y%m%d")
+    legs = []
+    for sym, p in pos.items():
+        # OCC option symbols look like SPY260604P00540000; match our ticker + today's expiry.
+        if (p.get("asset_class") == "us_option" or sym.startswith(TICKER)) and today_occ in sym:
+            legs.append(sym)
+    return legs
+
 # ── notification ──────────────────────────────────────────────────────────────
 
 def send_email(subject, body):
@@ -415,13 +518,24 @@ def wait_until(hour, minute, tz=ET):
 def et_now():
     return datetime.now(ET)
 
-# ── main ──────────────────────────────────────────────────────────────────────
+# ── entry phase ────────────────────────────────────────────────────────────────
 
-def main():
+def run_entry():
+    """ENTRY job: run filters, enter the iron condor at market open, and attach a
+    resting take-profit (buy-back) order at PROFIT_TARGET. Returns a context dict
+    on success (used by --mode all to chain into the close), or None if no
+    position was taken. This job is short, so its workflow can be scheduled well
+    before the open to absorb GitHub's scheduler jitter."""
     log.info("=" * 60)
-    log.info("0DTE Iron Condor Trader — starting")
+    log.info("0DTE Iron Condor Trader — ENTRY phase")
     today = date.today()
     log.info(f"Date: {today}  Weekday: {today.strftime('%A')}")
+
+    # ── 0. Wait for entry time ──────────────────────────────────────────────────
+    # The entry workflow fires hours early (to outrun GitHub's scheduler jitter),
+    # so hold here until 10:00 ET. Running the VIX/gap filters AFTER this means they
+    # evaluate live data at entry time, not stale pre-market data.
+    wait_until(*ENTRY_TIME)
 
     # ── 1. Pre-checks ──────────────────────────────────────────────────────────
     vix_decimal = get_vix()
@@ -454,10 +568,7 @@ def main():
 
     log.info(f"Filters passed: VIX={vix_level:.1f}  gap={gap_pct*100:.2f}%")
 
-    # ── 2. Wait for entry ──────────────────────────────────────────────────────
-    wait_until(*ENTRY_TIME)
-
-    # Re-fetch current price at entry time
+    # ── 2. Fetch the entry price (already at/after the open) ─────────────────────
     try:
         req = StockBarsRequest(
             symbol_or_symbols=[TICKER],
@@ -606,12 +717,32 @@ def main():
                     f"falling back to model estimate ${entry_credit:.4f}/share.")
         actual_credit = entry_credit
 
+    credit_dollars = actual_credit * 100 * contracts
+    log.info(f"FILLED. Net credit ${actual_credit:.4f}/share  (${credit_dollars:.2f} total).")
+
+    # ── 8. Attach take-profit: resting buy-back at PROFIT_TARGET of the credit ───
+    # 50% profit ⇒ buy the condor back once it can be closed for (1-PROFIT_TARGET)
+    # of the credit. limit_price is the positive max debit we will pay.
+    tp_debit = max(round(actual_credit * (1 - PROFIT_TARGET), 2), 0.01)
+    tp_order = place_take_profit(ps_sym, pl_sym, cs_sym, cl_sym, contracts, tp_debit)
+    if tp_order is None:
+        log.warning("Take-profit order failed to submit — position is OPEN with no "
+                    "resting TP. The close job will still flatten at 3:00 PM ET.")
+    else:
+        log.info(f"Take-profit resting at ${tp_debit:.2f}/share debit "
+                 f"(= {PROFIT_TARGET*100:.0f}% of ${actual_credit:.2f} credit).")
+
+    # ── 9. Entry email ──────────────────────────────────────────────────────────
     mkt_credit_line = (
         f"Mkt mid credit: ${market_mid_credit*100:.2f}/contract  "
         f"(BS est: ${bs_entry_credit*100:.2f}/contract)\n"
         if market_mid_credit is not None else
         f"BS est. credit:  ${bs_entry_credit*100:.2f}/contract  "
         f"(live quotes unavailable)\n"
+    )
+    tp_line = (
+        f"Take-profit:  buy-back @ ${tp_debit*100:.2f}/contract "
+        f"({PROFIT_TARGET*100:.0f}% target)  [{'resting' if tp_order else 'FAILED — see logs'}]\n"
     )
     entry_email_body = (
         f"Iron condor FILLED on {today}\n\n"
@@ -622,90 +753,99 @@ def main():
         f"Call spread: {k_cs:.0f}/{k_cl:.0f}  [{cs_sym}]\n\n"
         + mkt_credit_line
         + f"Net credit:  ${actual_credit*100:.2f}/contract  "
-        f"(${actual_credit*100*contracts:.2f} total)\n"
-        f"Max risk:    ${max_loss_per_contract*contracts:.2f}\n"
+        f"(${credit_dollars:.2f} total)\n"
+        + tp_line
+        + f"Max risk:    ${max_loss_per_contract*contracts:.2f}\n"
     )
     send_email(f"0DTE Trader: ENTERED ({contracts} contracts)", entry_email_body)
-    credit_dollars = actual_credit * 100 * contracts
-    target_profit_dollars = PROFIT_TARGET * credit_dollars
-    log.info(f"FILLED. Net credit ${actual_credit:.4f}/share  (${credit_dollars:.2f} total). "
-             f"Profit target: ${target_profit_dollars:.2f} unrealized.")
 
-    # ── 9. Monitor via live option quotes (fallback: position P&L) ──────────────
-    log.info(f"Monitoring until 3:00 PM ET or +${target_profit_dollars:.2f} unrealized.")
-    exit_reason = "time"
-    last_unreal = 0.0
+    return {
+        "legs": legs,
+        "contracts": contracts,
+        "actual_credit": actual_credit,
+        "credit_dollars": credit_dollars,
+        "tp_debit": tp_debit,
+        "today": today,
+    }
 
-    while True:
-        now = et_now()
-        if (now.hour, now.minute) >= EXIT_TIME:
-            log.info("3:00 PM ET — force closing position.")
-            exit_reason = "time"
-            break
+# ── close phase ────────────────────────────────────────────────────────────────
 
-        # Primary: live option quotes for current spread cost
-        live_q = get_option_quotes([ps_sym, pl_sym, cs_sym, cl_sym])
-        if all(live_q.get(s, {}).get("mid", 0) > 0 for s in [ps_sym, pl_sym, cs_sym, cl_sym]):
-            current_cost = ((live_q[ps_sym]["mid"] - live_q[pl_sym]["mid"]) +
-                            (live_q[cs_sym]["mid"] - live_q[cl_sym]["mid"]))
-            last_unreal = (actual_credit - current_cost) * 100 * contracts
-            pct = (last_unreal / credit_dollars * 100) if credit_dollars else 0.0
-            log.info(f"  {now.strftime('%H:%M')}  (quotes)  cost=${current_cost:.4f}  "
-                     f"unrealized=${last_unreal:.2f}  ({pct:.1f}% of credit)")
-        else:
-            # Fallback: Alpaca position P&L
-            try:
-                pos = get_positions_map()
-            except Exception as e:
-                log.warning(f"Quote fetch failed and position fetch failed: {e}")
-                time.sleep(POLL_SECS)
-                continue
+def run_close():
+    """CLOSE job: wake ~1 hour before the 4:00 PM ET close. Cancel the resting
+    take-profit and flatten whatever is still open. If the take-profit already
+    filled, there is nothing to do. State is reconstructed from Alpaca positions,
+    so this runs as a fully independent job from the entry."""
+    log.info("=" * 60)
+    log.info("0DTE Iron Condor Trader — CLOSE phase")
+    today = date.today()
 
-            legs_pos = [pos[s] for s in legs if s in pos]
-            if not legs_pos:
-                log.warning("No quotes and no legs in positions yet — retrying.")
-                time.sleep(POLL_SECS)
-                continue
+    # Hold until the close time in case the runner fired early (jitter buffer).
+    wait_until(*EXIT_TIME)
 
-            last_unreal = sum(float(p.get("unrealized_pl", 0.0)) for p in legs_pos)
-            pct = (last_unreal / credit_dollars * 100) if credit_dollars else 0.0
-            log.info(f"  {now.strftime('%H:%M')}  (positions fallback)  legs={len(legs_pos)}/4  "
-                     f"unrealized=${last_unreal:.2f}  ({pct:.1f}% of credit)")
+    legs = find_open_condor_legs()
+    if not legs:
+        log.info("No open condor legs found — take-profit likely already filled.")
+        send_email(
+            "0DTE Trader: CLOSE (nothing open)",
+            f"No open SPY 0DTE legs at {EXIT_TIME[0]:02d}:{EXIT_TIME[1]:02d} ET on {today}. "
+            f"The {PROFIT_TARGET*100:.0f}% take-profit either filled earlier or no trade was placed."
+        )
+        log.info("Done.")
+        return
 
-        if last_unreal >= target_profit_dollars:
-            log.info(f"Profit target hit: ${last_unreal:.2f} >= ${target_profit_dollars:.2f} — closing.")
-            exit_reason = "profit_target"
-            break
+    log.info(f"{len(legs)} open legs at close time: {legs}")
 
-        time.sleep(POLL_SECS)
-
-    # ── 10. Close all open legs (liquidation) ────────────────────────────────────
+    # Mark-to-market P&L before flattening (Alpaca tracks unrealized_pl per leg).
     try:
         pos = get_positions_map()
-        open_legs = [s for s in legs if s in pos]
-    except Exception:
-        open_legs = legs
-    if open_legs:
-        log.info(f"Closing {len(open_legs)} open legs: {open_legs}")
-        close_all_legs(open_legs)
-    else:
-        log.info("No open legs to close (may have expired or already closed).")
+        last_unreal = sum(float(pos[s].get("unrealized_pl", 0.0)) for s in legs if s in pos)
+    except Exception as e:
+        log.warning(f"Could not read unrealized P&L before close: {e}")
+        last_unreal = float("nan")
+
+    # Cancel the resting take-profit first — Alpaca rejects close while a working
+    # order exists on the symbol.
+    cancel_open_orders_for(legs)
+    time.sleep(2)
+
+    log.info(f"Force-closing {len(legs)} legs: {legs}")
+    close_all_legs(legs)
     time.sleep(5)  # brief pause for closing fills
 
-    final_pnl = last_unreal  # mark-to-market P&L at exit
+    pnl_str = f"${last_unreal:+.2f}" if last_unreal == last_unreal else "unknown"
     exit_email = (
-        f"0DTE Trade closed — {today}\n\n"
-        f"Exit reason: {exit_reason}\n"
-        f"Est. P&L (mark-to-market): ${final_pnl:+.2f}\n\n"
-        f"Net credit collected: ${actual_credit*100:.2f}/contract  (${credit_dollars:.2f} total)\n"
-        f"Contracts: {contracts}\n"
+        f"0DTE Trade force-closed — {today}\n\n"
+        f"Exit reason: time (3:00 PM ET)\n"
+        f"Est. P&L (mark-to-market): {pnl_str}\n\n"
+        f"Legs flattened: {len(legs)}\n"
     )
-    log.info(f"Trade closed. Reason={exit_reason}  Est. P&L=${final_pnl:+.2f}")
-    send_email(
-        f"0DTE Trader: CLOSED ({exit_reason}) est. ${final_pnl:+.2f}",
-        exit_email
-    )
+    log.info(f"Trade force-closed at time stop. Est. P&L={pnl_str}")
+    send_email(f"0DTE Trader: CLOSED (time) est. {pnl_str}", exit_email)
     log.info("Done.")
+
+# ── dispatch ────────────────────────────────────────────────────────────────────
+
+def run_all():
+    """Manual end-to-end run: enter at open, then hold (the resting TP may fill on
+    its own) until the close job flattens any remainder. Used for local/manual
+    runs; production uses the two scheduled jobs (entry, close) instead."""
+    ctx = run_entry()
+    if ctx is None:
+        log.info("No position taken — skipping close phase.")
+        return
+    run_close()
+
+def main():
+    mode = (sys.argv[1].lower() if len(sys.argv) > 1 else "all")
+    if mode == "entry":
+        run_entry()
+    elif mode == "close":
+        run_close()
+    elif mode == "all":
+        run_all()
+    else:
+        log.error(f"Unknown mode '{mode}'. Use one of: entry | close | all")
+        sys.exit(2)
 
 
 if __name__ == "__main__":

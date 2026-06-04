@@ -1,20 +1,27 @@
-name: 0DTE Iron Condor Trader
+name: 0DTE Iron Condor — Close
 
 on:
   schedule:
-    # Fire at 9:30 AM ET (market open); the script then waits to 10:00 ET to enter.
-    # GitHub cron is UTC and has no DST: 13:30 UTC = 9:30 EDT (summer).
-    # In winter (EST) change this to '30 14 * * 1-5' (= 9:30 EST) to avoid a long idle wait.
-    - cron: '30 13 * * 1-5'   # 9:30 AM EDT, Mon–Fri
+    # CLOSE job: wakes ~1 hour before the 4:00 PM ET close, cancels the resting
+    # take-profit and flattens anything still open. State is reconstructed from
+    # Alpaca positions, so this is fully independent of the entry job.
+    #
+    # We fire ~1h early at 2:00 ET; the script's wait_until(15:00 ET) holds it to
+    # exactly 3:00 PM ET, absorbing scheduler jitter. GitHub cron is UTC, no DST —
+    # adjust the hour by season:
+    #   summer (EDT, UTC-4): '0 18 * * 1-5'  = 2:00 PM EDT
+    #   winter (EST, UTC-5): '0 19 * * 1-5'  = 2:00 PM EST
+    - cron: '0 18 * * 1-5'    # 2:00 PM EDT, Mon–Fri (summer)
   workflow_dispatch:            # allow manual trigger from GitHub UI
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  trade:
+  close:
     runs-on: ubuntu-latest
-    timeout-minutes: 420        # 7h: covers 9:30 wake + wait to 10:00 + monitor to 3:00 PM (DST-safe)
+    # Fire at 2:00 ET, wait to 3:00 ET, flatten — ~1h + slack. Well under the 6h cap.
+    timeout-minutes: 120
 
     env:
       ALPACA_API_KEY:    ${{ secrets.ALPACA_API_KEY }}
@@ -35,15 +42,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run 0DTE trader
+      - name: Run 0DTE trader (close)
         run: |
           mkdir -p logs
-          python dte0_trader.py
+          python dte0_trader.py close
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: trade-logs-${{ github.run_id }}
+          name: trade-logs-close-${{ github.run_id }}
           path: logs/
           retention-days: 30

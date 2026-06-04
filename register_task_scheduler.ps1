@@ -5,8 +5,14 @@ $taskName   = "0DTE-IronCondor-Trader"
 $scriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $batFile    = Join-Path $scriptDir "run_dte0_trader.bat"
 
-# 9:30 AM Eastern — adjust if your machine runs in a different timezone
-$triggerTime = "09:30"
+# Compute the local-clock time that equals 9:30 AM Eastern, so the task fires
+# at the right wall-clock moment regardless of the machine's timezone (PDT, CDT, etc.).
+$etZone      = [TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
+$localZone   = [TimeZoneInfo]::Local
+$etRef       = [DateTime]::SpecifyKind([DateTime]::Today.AddHours(9).AddMinutes(30), 'Unspecified')
+$localRef    = [TimeZoneInfo]::ConvertTime($etRef, $etZone, $localZone)
+$triggerTime = $localRef.ToString("HH:mm")
+Write-Host "Trigger time: $triggerTime local  (= 09:30 ET in zone '$($etZone.Id)'  local='$($localZone.Id)')"
 
 $action  = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$batFile`"" -WorkingDirectory $scriptDir
 

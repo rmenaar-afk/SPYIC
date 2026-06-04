@@ -1,0 +1,58 @@
+name: 0DTE Iron Condor — Entry
+
+on:
+  schedule:
+    # ENTRY job: enters at 10:00 ET and attaches a 75% take-profit, then EXITS.
+    # Because it does not stay alive to monitor, it is a short job and can be
+    # scheduled well before entry to absorb GitHub's scheduler jitter (scheduled
+    # workflows are routinely delayed, sometimes by hours).
+    #
+    # We fire ~3h early at 7:00 ET; the script's wait_until(10:00 ET) holds it to
+    # entry time, so any delay up to ~3h still enters exactly at 10:00. GitHub cron
+    # is UTC with no DST — adjust the hour by season:
+    #   summer (EDT, UTC-4): '0 11 * * 1-5'  = 7:00 EDT
+    #   winter (EST, UTC-5): '0 12 * * 1-5'  = 7:00 EST
+    - cron: '0 11 * * 1-5'    # 7:00 AM EDT, Mon–Fri (summer)
+  workflow_dispatch:            # allow manual trigger from GitHub UI
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  entry:
+    runs-on: ubuntu-latest
+    # Worst case: fire at 7:00 ET, wait to 10:00, enter — ~3h + slack. Well under
+    # GitHub's hard 6h job cap.
+    timeout-minutes: 220
+
+    env:
+      ALPACA_API_KEY:    ${{ secrets.ALPACA_API_KEY }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      GMAIL_USER:        ${{ secrets.GMAIL_USER }}
+      GMAIL_APP_PASS:    ${{ secrets.GMAIL_APP_PASS }}
+      NOTIFY_EMAIL:      ${{ secrets.NOTIFY_EMAIL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run 0DTE trader (entry)
+        run: |
+          mkdir -p logs
+          python dte0_trader.py entry
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trade-logs-entry-${{ github.run_id }}
+          path: logs/
+          retention-days: 30
