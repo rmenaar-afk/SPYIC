@@ -1,8 +1,10 @@
 name: Breakout Scanner
 
 on:
-  schedule:
-    - cron: '0 21 * * 1-5'    # 4:00 PM ET (UTC-5) Mon–Fri — runs after market close
+  # Cron disabled 2026-06-10: the daily scan now runs as a local Claude Code
+  # scheduled task ("breakout-scanner"). Uncomment to re-enable in Actions.
+  # schedule:
+  #   - cron: '0 21 * * 1-5'    # 21:00 UTC Mon–Fri — after US market close
   workflow_dispatch:            # allow manual trigger from GitHub UI
 
 env:
